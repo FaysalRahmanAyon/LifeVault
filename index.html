@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LifeVault - Secure Digital Handover</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.263.1/lucide.min.css" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: 'Inter', sans-serif; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        /* Custom scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- Utility: Encryption Logic (Web Crypto API) ---
+        async function generateKey() {
+            return window.crypto.subtle.generateKey(
+                { name: "AES-GCM", length: 256 },
+                true,
+                ["encrypt", "decrypt"]
+            );
+        }
+
+        async function exportKey(key) {
+            const exported = await window.crypto.subtle.exportKey("raw", key);
+            return Array.from(new Uint8Array(exported)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        async function encryptData(data, keyRawHex) {
+            // Import key back from hex
+            const keyBuffer = new Uint8Array(keyRawHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+            const key = await window.crypto.subtle.importKey(
+                "raw", 
+                keyBuffer, 
+                "AES-GCM", 
+                true, 
+                ["encrypt"]
+            );
+
+            const encodedData = new TextEncoder().encode(JSON.stringify(data));
+            const iv = window.crypto.getRandomValues(new Uint8Array(12)); // 96-bit IV
+            
+            const encrypted = await window.crypto.subtle.encrypt(
+                { name: "AES-GCM", iv: iv },
+                key,
+                encodedData
+            );
+
+            // Convert to Hex for portability
+            const encryptedArray = Array.from(new Uint8Array(encrypted));
+            const ivArray = Array.from(iv);
+            
+            return {
+                ciphertext: encryptedArray.map(b => b.toString(16).padStart(2, '0')).join(''),
+                iv: ivArray.map(b => b.toString(16).padStart(2, '0')).join(''),
+                timestamp: new Date().toISOString()
+            };
+        }
+
+        // --- Components ---
+
+        const CategoryButton = ({ icon, label, active, onClick }) => (
+            <button 
+                onClick={onClick}
+                className={`flex items-center space-x-2 px-4 py-3 rounded-lg w-full transition-all ${
+                    active ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                }`}
+            >
+                {icon}
+                <span className="font-medium">{label}</span>
+            </button>
+        );
+
+        const InputField = ({ label, value, onChange, type = "text", placeholder }) => (
+            <div className="mb-4">
+                <label className="block text-sm font-medium text-slate-400 mb-1">{label}</label>
+                <input 
+                    type={type} 
+                    value={value}
+                    onChange={e => onChange(e.target.value)}
+                    placeholder={placeholder}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                />
+            </div>
+        );
+
+        const VaultEntry = ({ data, onDelete }) => (
+            <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4 mb-3 flex justify-between items-start group hover:border-indigo-500/30 transition-all">
+                <div>
+                    <h4 className="font-bold text-slate-200">{data.title}</h4>
+                    <p className="text-sm text-slate-400 mt-1">{data.username}</p>
+                    <div className="text-xs text-slate-500 mt-2 font-mono bg-slate-900/50 inline-block px-2 py-1 rounded">
+                        {data.category}
+                    </div>
+                </div>
+                <button onClick={onDelete} className="text-slate-600 hover:text-red-400 transition-colors">
+                    <i data-lucide="trash-2" className="w-4 h-4"></i>
+                </button>
+            </div>
+        );
+
+        // CONFIG: Define custom labels for each category
+        const categoryConfig = {
+            Financial: {
+                titleLabel: "Bank / Institution Name",
+                titlePlaceholder: "Chase Bank",
+                userLabel: "Account Number / User ID",
+                userPlaceholder: "XXXX-XXXX-XXXX",
+                secretLabel: "Online Banking Password / PIN",
+                secretPlaceholder: "Password123!"
+            },
+            Legal: {
+                titleLabel: "Document Type",
+                titlePlaceholder: "Last Will & Testament",
+                userLabel: "Location of Physical Copy",
+                userPlaceholder: "Safe Deposit Box #402",
+                secretLabel: "Combination / Access Code",
+                secretPlaceholder: "12-34-56"
+            },
+            Social: {
+                titleLabel: "Platform Name",
+                titlePlaceholder: "Facebook / Google",
+                userLabel: "Email / Handle",
+                userPlaceholder: "john.doe@gmail.com",
+                secretLabel: "Password",
+                secretPlaceholder: "CorrectHorseBatteryStaple"
+            },
+            Medical: {
+                titleLabel: "Provider / Insurance",
+                titlePlaceholder: "Blue Cross Blue Shield",
+                userLabel: "Policy Number",
+                userPlaceholder: "XJ-90210-22",
+                secretLabel: "Member ID / Portal Password",
+                secretPlaceholder: "Password or Group ID"
+            },
+            Crypto: {
+                titleLabel: "Wallet Name / Exchange",
+                titlePlaceholder: "Ledger Nano X / Coinbase",
+                userLabel: "Public Address (deposit)",
+                userPlaceholder: "0x123...abc",
+                secretLabel: "Seed Phrase / Private Key",
+                secretPlaceholder: "witch collapse practice feed shame open..."
+            }
+        };
+
+        const App = () => {
+            const [view, setView] = useState('dashboard'); // dashboard, add, export
+            const [entries, setEntries] = useState([]);
+            const [category, setCategory] = useState('Financial');
+            
+            // Form State
+            const [title, setTitle] = useState('');
+            const [username, setUsername] = useState('');
+            const [secret, setSecret] = useState('');
+            const [notes, setNotes] = useState('');
+
+            // Export State
+            const [generatedKey, setGeneratedKey] = useState(null);
+            const [encryptedBlob, setEncryptedBlob] = useState(null);
+
+            // Get current config based on selected category
+            const currentConfig = categoryConfig[category];
+
+            useEffect(() => {
+                lucide.createIcons();
+            }, [view, entries]);
+
+            const addEntry = () => {
+                if(!title) return;
+                const newEntry = { id: Date.now(), category, title, username, secret, notes };
+                setEntries([...entries, newEntry]);
+                setTitle(''); setUsername(''); setSecret(''); setNotes('');
+                setView('dashboard');
+            };
+
+            const deleteEntry = (id) => {
+                setEntries(entries.filter(e => e.id !== id));
+            };
+
+            const handleLockAndExport = async () => {
+                // 1. Generate a new symmetric key
+                const keyObj = await generateKey();
+                const keyHex = await exportKey(keyObj);
+                
+                // 2. Encrypt the entries
+                const encrypted = await encryptData(entries, keyHex);
+                
+                setGeneratedKey(keyHex);
+                setEncryptedBlob(encrypted);
+                setView('download');
+            };
+
+            const downloadVaultFile = () => {
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(encryptedBlob));
+                const downloadAnchorNode = document.createElement('a');
+                downloadAnchorNode.setAttribute("href", dataStr);
+                downloadAnchorNode.setAttribute("download", "my_secure_legacy.vault");
+                document.body.appendChild(downloadAnchorNode);
+                downloadAnchorNode.click();
+                downloadAnchorNode.remove();
+            };
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 flex justify-center items-start">
+                    <div className="w-full max-w-4xl glass-panel rounded-2xl shadow-2xl overflow-hidden min-h-[600px] flex flex-col md:flex-row">
+                        
+                        {/* Sidebar */}
+                        <div className="md:w-64 bg-slate-900/50 p-6 border-r border-slate-700/50 flex flex-col">
+                            <div className="flex items-center space-x-2 mb-8 text-indigo-400">
+                                <i data-lucide="shield-check" className="w-8 h-8"></i>
+                                <h1 className="text-xl font-bold tracking-tight text-white">LifeVault</h1>
+                            </div>
+                            
+                            <nav className="space-y-2 flex-1">
+                                <CategoryButton 
+                                    active={view === 'dashboard' || view === 'add'} 
+                                    onClick={() => setView('dashboard')}
+                                    icon={<i data-lucide="layout-grid" className="w-5 h-5"></i>} 
+                                    label="Dashboard" 
+                                />
+                                <CategoryButton 
+                                    active={false} 
+                                    onClick={() => setView('add')}
+                                    icon={<i data-lucide="plus-circle" className="w-5 h-5"></i>} 
+                                    label="Add Asset" 
+                                />
+                            </nav>
+
+                            <div className="mt-auto pt-6 border-t border-slate-800">
+                                <button 
+                                    onClick={handleLockAndExport}
+                                    disabled={entries.length === 0}
+                                    className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 px-4 rounded-lg shadow-lg shadow-emerald-900/20 transition-all flex items-center justify-center space-x-2"
+                                >
+                                    <i data-lucide="lock" className="w-4 h-4"></i>
+                                    <span>Lock & Export</span>
+                                </button>
+                                <p className="text-xs text-slate-500 mt-3 text-center">
+                                    Local AES-GCM Encryption.<br/>Data never leaves this device.
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* Main Content Area */}
+                        <div className="flex-1 p-6 md:p-8 overflow-y-auto max-h-[800px]">
+                            
+                            {view === 'dashboard' && (
+                                <div className="animate-fade-in">
+                                    <h2 className="text-2xl font-bold mb-6">Your Digital Assets</h2>
+                                    {entries.length === 0 ? (
+                                        <div className="text-center py-20 border-2 border-dashed border-slate-700 rounded-xl">
+                                            <div className="bg-slate-800 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                                                <i data-lucide="safe" className="w-8 h-8 text-slate-500"></i>
+                                            </div>
+                                            <h3 className="text-lg font-medium text-slate-300">Vault is Empty</h3>
+                                            <p className="text-slate-500 mt-2">Add your first critical asset to begin.</p>
+                                            <button onClick={() => setView('add')} className="mt-4 text-indigo-400 hover:text-indigo-300 font-medium">
+                                                + Add Entry
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 gap-4">
+                                            {entries.map(entry => (
+                                                <VaultEntry key={entry.id} data={entry} onDelete={() => deleteEntry(entry.id)} />
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {view === 'add' && (
+                                <div className="max-w-lg mx-auto animate-fade-in">
+                                    <div className="flex items-center space-x-2 mb-6">
+                                        <button onClick={() => setView('dashboard')} className="text-slate-400 hover:text-white">
+                                            <i data-lucide="arrow-left" className="w-5 h-5"></i>
+                                        </button>
+                                        <h2 className="text-2xl font-bold">Add Secure Entry</h2>
+                                    </div>
+
+                                    <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-xl">
+                                        <div className="mb-6 flex space-x-2 overflow-x-auto pb-2">
+                                            {Object.keys(categoryConfig).map(cat => (
+                                                <button 
+                                                    key={cat}
+                                                    onClick={() => setCategory(cat)}
+                                                    className={`px-3 py-1 rounded-full text-sm font-medium whitespace-nowrap ${
+                                                        category === cat ? 'bg-indigo-500 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                                                    }`}
+                                                >
+                                                    {cat}
+                                                </button>
+                                            ))}
+                                        </div>
+
+                                        <InputField 
+                                            label={currentConfig.titleLabel} 
+                                            value={title} 
+                                            onChange={setTitle} 
+                                            placeholder={currentConfig.titlePlaceholder} 
+                                        />
+                                        <InputField 
+                                            label={currentConfig.userLabel} 
+                                            value={username} 
+                                            onChange={setUsername} 
+                                            placeholder={currentConfig.userPlaceholder} 
+                                        />
+                                        
+                                        <div className="mb-4">
+                                            <label className="block text-sm font-medium text-slate-400 mb-1">
+                                                {currentConfig.secretLabel}
+                                            </label>
+                                            <div className="relative">
+                                                <input 
+                                                    type="text" 
+                                                    value={secret}
+                                                    onChange={e => setSecret(e.target.value)}
+                                                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-emerald-400 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                    placeholder={currentConfig.secretPlaceholder}
+                                                />
+                                                <div className="absolute right-3 top-2.5 text-slate-500">
+                                                    <i data-lucide="eye-off" className="w-4 h-4"></i>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="mb-6">
+                                            <label className="block text-sm font-medium text-slate-400 mb-1">Instructions for Beneficiary</label>
+                                            <textarea 
+                                                value={notes}
+                                                onChange={e => setNotes(e.target.value)}
+                                                className="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-white h-24 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                                                placeholder="Use this to pay the mortgage. The 2FA code goes to my iPad..."
+                                            ></textarea>
+                                        </div>
+
+                                        <button 
+                                            onClick={addEntry}
+                                            disabled={!title}
+                                            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-bold py-3 rounded-lg transition-all"
+                                        >
+                                            Save to Vault
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {view === 'download' && (
+                                <div className="text-center animate-fade-in max-w-lg mx-auto pt-10">
+                                    <div className="w-20 h-20 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-6 shadow-xl shadow-emerald-500/10">
+                                        <i data-lucide="lock" className="w-10 h-10"></i>
+                                    </div>
+                                    <h2 className="text-3xl font-bold text-white mb-2">Vault Sealed</h2>
+                                    <p className="text-slate-400 mb-8">
+                                        Your data has been encrypted with AES-GCM-256. <br/>
+                                        <span className="text-red-400 font-medium">Without the key below, this data is mathematically unrecoverable.</span>
+                                    </p>
+
+                                    <div className="bg-slate-900 border border-slate-700 rounded-lg p-4 mb-6 text-left">
+                                        <label className="text-xs uppercase tracking-wider text-slate-500 font-bold">Your Master Key (Save this separately!)</label>
+                                        <div className="font-mono text-xl text-yellow-400 break-all mt-2 select-all cursor-pointer">
+                                            {generatedKey}
+                                        </div>
+                                    </div>
+
+                                    <button 
+                                        onClick={downloadVaultFile}
+                                        className="w-full bg-slate-100 hover:bg-white text-slate-900 font-bold py-4 rounded-lg flex items-center justify-center space-x-2 mb-4"
+                                    >
+                                        <i data-lucide="download" className="w-5 h-5"></i>
+                                        <span>Download .vault File</span>
+                                    </button>
+
+                                    <div className="bg-blue-900/20 border border-blue-800/50 p-4 rounded-lg text-sm text-blue-200">
+                                        <strong>Protocol:</strong> Give the <code>.vault</code> file to your lawyer or cloud storage. Give the <strong>Master Key</strong> to your trusted contact physically (on paper or USB).
+                                    </div>
+                                    
+                                    <button onClick={() => setView('dashboard')} className="mt-8 text-slate-500 hover:text-white underline text-sm">
+                                        Return to Dashboard
+                                    </button>
+                                </div>
+                            )}
+
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
