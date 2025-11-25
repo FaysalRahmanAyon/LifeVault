@@ -1,3 +1,5 @@
+<img width="990" height="665" alt="image" src="https://github.com/user-attachments/assets/ebafa764-c6b4-478d-86c8-6722968eac8e" />
+
 # **LifeVault: Secure Digital Inheritance System**
 
 **LifeVault** is a "dead man's switch" solution for your digital life. It allows you to aggregate critical digital assets (bank accounts, crypto wallets, legal documents), encrypt them client-side into a portable .vault file, and provide a secure, offline Python mechanism for your beneficiaries to recover them.
